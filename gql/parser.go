@@ -457,89 +457,40 @@ type Result struct {
 	Schema    *pb.SchemaRequest
 }
 
-// Parse initializes and runs the lexer. It also constructs the GraphQuery subgraph
-// from the lexed items.
+// Parse initializes and runs the lexer and parser.
 func Parse(r Request) (res Result, rerr error) {
-	query := r.Str
-	vmap := convertToVarMap(r.Variables)
-
-	lexer := lex.NewLexer(query)
+	lexer := lex.NewLexer(r.Str)
 	lexer.Run(lexTopLevel)
 	if err := lexer.ValidateResult(); err != nil {
 		return res, err
 	}
 
-	var qu *GraphQuery
-	it := lexer.NewIterator()
 	fmap := make(fragmentMap)
+	vmap := convertToVarMap(r.Variables)
+
+	it := lexer.NewIterator()
 	for it.Next() {
 		item := it.Item()
-		switch item.Typ {
-		case itemOpType:
-			if item.Val == "mutation" {
-				return res, item.Errorf("Mutation block no longer allowed.")
+		switch {
+		case item.Typ == itemOpType && item.Val == "fragment":
+			// TODO(jchiu0): This is to be done in ParseSchema once it is ready.
+			fnode, err := getFragment(it)
+			if err != nil {
+				return res, err
 			}
-			if item.Val == "schema" {
-				if res.Schema != nil {
-					return res, item.Errorf("Only one schema block allowed ")
-				}
-				if res.Query != nil {
-					return res, item.Errorf("Schema block is not allowed with query block")
-				}
-				if res.Schema, rerr = getSchema(it); rerr != nil {
-					return res, rerr
-				}
-			} else if item.Val == "fragment" {
-				// TODO(jchiu0): This is to be done in ParseSchema once it is ready.
-				fnode, rerr := getFragment(it)
-				if rerr != nil {
-					return res, rerr
-				}
-				fmap[fnode.Name] = fnode
-			} else if item.Val == "query" {
-				if res.Schema != nil {
-					return res, item.Errorf("Schema block is not allowed with query block")
-				}
-				if qu, rerr = getVariablesAndQuery(it, vmap); rerr != nil {
-					return res, rerr
-				}
-				res.Query = append(res.Query, qu)
+			fmap[fnode.Name] = fnode
+		default:
+			if !it.Prev() {
+				it = lexer.NewIterator()
 			}
-		case itemLeftCurl:
-			if qu, rerr = getQuery(it); rerr != nil {
-				return res, rerr
+			if err := ParseQuery(&res, it, vmap); err != nil {
+				return res, err
 			}
-			res.Query = append(res.Query, qu)
-		case itemName:
-			it.Prev()
-			if qu, rerr = getQuery(it); rerr != nil {
-				return res, rerr
-			}
-			res.Query = append(res.Query, qu)
 		}
 	}
 
 	if len(res.Query) != 0 {
-		res.QueryVars = make([]*Vars, 0, len(res.Query))
-		for i := 0; i < len(res.Query); i++ {
-			qu := res.Query[i]
-			// Try expanding fragments using fragment map.
-			if err := qu.expandFragments(fmap); err != nil {
-				return res, err
-			}
-
-			// Substitute all variables with corresponding values
-			if err := substituteVariables(qu, vmap); err != nil {
-				return res, err
-			}
-
-			res.QueryVars = append(res.QueryVars, &Vars{})
-			// Collect vars used and defined in Result struct.
-			qu.collectVars(res.QueryVars[i])
-		}
-
-		allVars := res.QueryVars
-		if err := checkDependency(allVars); err != nil {
+		if err := expandQuery(&res, fmap, vmap); err != nil {
 			return res, err
 		}
 	}
@@ -549,6 +500,86 @@ func Parse(r Request) (res Result, rerr error) {
 	}
 
 	return res, nil
+}
+
+// expandQuery expands the query using variables and fragments
+func expandQuery(res *Result, fmap fragmentMap, vmap varMap) error {
+	res.QueryVars = make([]*Vars, 0, len(res.Query))
+	for i := 0; i < len(res.Query); i++ {
+		qu := res.Query[i]
+		// Try expanding fragments using fragment map.
+		if err := qu.expandFragments(fmap); err != nil {
+			return err
+		}
+
+		// Substitute all variables with corresponding values
+		if err := substituteVariables(qu, vmap); err != nil {
+			return err
+		}
+
+		res.QueryVars = append(res.QueryVars, &Vars{})
+		// Collect vars used and defined in Result struct.
+		qu.collectVars(res.QueryVars[i])
+	}
+
+	allVars := res.QueryVars
+	if err := checkDependency(allVars); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// ParseQuery parses the given query.
+// It also constructs the GraphQuery subgraph from the lexed items.
+func ParseQuery(res *Result, it *lex.ItemIterator, vmap varMap) (rerr error) {
+	var qu *GraphQuery
+loop:
+	for it.Next() {
+		item := it.Item()
+		switch item.Typ {
+		case itemOpType:
+			if item.Val == "mutation" {
+				return item.Errorf("Mutation block no longer allowed.")
+			}
+			if item.Val == "schema" {
+				if res.Schema != nil {
+					return item.Errorf("Only one schema block allowed ")
+				}
+				if res.Query != nil {
+					return item.Errorf("Schema block is not allowed with query block")
+				}
+				if res.Schema, rerr = getSchema(it); rerr != nil {
+					return rerr
+				}
+			} else if item.Val == "fragment" {
+				return item.Errorf("fragment block is not allowed inside query block")
+			} else if item.Val == "query" {
+				if res.Schema != nil {
+					return item.Errorf("Schema block is not allowed with query block")
+				}
+				if qu, rerr = getVariablesAndQuery(it, vmap); rerr != nil {
+					return rerr
+				}
+				res.Query = append(res.Query, qu)
+			}
+		case itemLeftCurl:
+			if qu, rerr = getQuery(it); rerr != nil {
+				return rerr
+			}
+			res.Query = append(res.Query, qu)
+		case itemRightCurl:
+			break loop
+		case itemName:
+			it.Prev()
+			if qu, rerr = getQuery(it); rerr != nil {
+				return rerr
+			}
+			res.Query = append(res.Query, qu)
+		}
+	}
+
+	return nil
 }
 
 func validateResult(res *Result) error {
