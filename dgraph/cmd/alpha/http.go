@@ -320,7 +320,7 @@ func mutationHandler(w http.ResponseWriter, r *http.Request) {
 
 	case "application/rdf":
 		// Parse N-Quads.
-		mu, err = gql.ParseMutation(string(body))
+		_, mu, err = gql.ParseMutation(string(body))
 		if err != nil {
 			x.SetStatus(w, x.ErrorInvalidRequest, err.Error())
 			return

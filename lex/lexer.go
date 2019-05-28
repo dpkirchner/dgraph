@@ -165,6 +165,7 @@ type Lexer struct {
 	Width      int    // Width of last rune read from input.
 	widthStack []*RuneWidth
 	items      []Item  // channel of scanned items.
+	BlockDepth int     // nesting of blocks (e.g. mutation block inside upsert block)
 	Depth      int     // nesting of {}
 	ArgDepth   int     // nesting of ()
 	Mode       StateFn // Default state to go back to after reading a token.
@@ -194,7 +195,7 @@ func (l *Lexer) ValidateResult() error {
 func (l *Lexer) Run(f StateFn) *Lexer {
 	for state := f; state != nil; {
 		// The following statement is useful for debugging.
-		//fmt.Printf("Func: %v\n", runtime.FuncForPC(reflect.ValueOf(state).Pointer()).Name())
+		// fmt.Printf("Func: %v\n", runtime.FuncForPC(reflect.ValueOf(state).Pointer()).Name())
 		state = state(l)
 	}
 	return l

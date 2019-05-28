@@ -17,22 +17,121 @@
 package gql
 
 import (
-	"errors"
-
 	"github.com/dgraph-io/dgo/protos/api"
 	"github.com/dgraph-io/dgraph/lex"
 	"github.com/dgraph-io/dgraph/x"
 )
 
-func ParseMutation(mutation string) (*api.Mutation, error) {
+// ParseMutation parses a block into a mutation. Returns an object with a mutation or
+// an upsert block with mutation, otherwise returns nil with an error.
+func ParseMutation(mutation string) (res *Result, mu *api.Mutation, err error) {
 	lexer := lex.NewLexer(mutation)
-	lexer.Run(lexInsideMutation)
+	lexer.Run(lexIdentifyBlock)
+	if err := lexer.ValidateResult(); err != nil {
+		return nil, nil, err
+	}
+
 	it := lexer.NewIterator()
+	if !it.Next() {
+		return nil, nil, x.Errorf("Invalid mutation")
+	}
+
+	item := it.Item()
+	switch item.Typ {
+	case itemUpsertBlock:
+		if res, mu, err = ParseUpsertBlock(it); err != nil {
+			return nil, nil, err
+		}
+	case itemLeftCurl:
+		if mu, err = ParseMutationBlock(it); err != nil {
+			return nil, nil, err
+		}
+	default:
+		return nil, nil, x.Errorf("Unexpected token: [%s]", item.Val)
+	}
+
+	// mutations must be enclosed in a single block.
+	if it.Next() && it.Item().Typ != lex.ItemEOF {
+		return nil, nil, x.Errorf("Unexpected %s after the end of the block", it.Item().Val)
+	}
+
+	return res, mu, nil
+}
+
+// ParseUpsertBlock parses the upsert block
+func ParseUpsertBlock(it *lex.ItemIterator) (*Result, *api.Mutation, error) {
+	var mu *api.Mutation
+	var res Result
+	fragMap := make(fragmentMap)
+
+	// ==>upsert<=== {...}
+	if !it.Next() {
+		return nil, nil, x.Errorf("Unexpected end of upsert block")
+	}
+
+	// upsert ===>{<=== ....}
+	item := it.Item()
+	if item.Typ != itemLeftCurl {
+		return nil, nil, x.Errorf("Expected { at the start of block. Got: [%s]", item.Val)
+	}
+
+	for it.Next() {
+		item = it.Item()
+		switch item.Typ {
+		// upsert {... ===>}<===
+		case itemRightCurl:
+			if len(res.Query) != 0 {
+				if err := expandQuery(&res, fragMap, nil); err != nil {
+					return nil, nil, err
+				}
+			}
+			if err := validateResult(&res); err != nil {
+				return nil, nil, err
+			}
+			return &res, mu, nil
+
+		// upsert { ===>mutation<=== {...} query{...}}
+		// upsert { mutation{...} ===>query<==={...}}
+		case itemUpsertBlockOp:
+			if !it.Next() {
+				return nil, nil, x.Errorf("Unexpected end of upsert block")
+			}
+			if item.Val == "query" {
+				if err := ParseQuery(&res, it, nil); err != nil {
+					return nil, nil, err
+				}
+			} else if item.Val == "mutation" {
+				var err error
+				if mu, err = ParseMutationBlock(it); err != nil {
+					return nil, nil, err
+				}
+			} else {
+				return nil, nil, x.Errorf("should not reach here")
+			}
+
+		case itemOpType:
+			if item.Val == "fragment" {
+				fragNode, err := getFragment(it)
+				if err != nil {
+					return nil, nil, err
+				}
+				fragMap[fragNode.Name] = fragNode
+			} else {
+				return nil, nil, x.Errorf("should not reach here")
+			}
+
+		default:
+			return nil, nil, x.Errorf("unexpected token in upsert block [%s]", item.Val)
+		}
+	}
+
+	return nil, nil, x.Errorf("Invalid upsert block")
+}
+
+// ParseMutationBlock parses the mutation block
+func ParseMutationBlock(it *lex.ItemIterator) (*api.Mutation, error) {
 	var mu api.Mutation
 
-	if !it.Next() {
-		return nil, errors.New("Invalid mutation")
-	}
 	item := it.Item()
 	if item.Typ != itemLeftCurl {
 		return nil, x.Errorf("Expected { at the start of block. Got: [%s]", item.Val)
@@ -44,10 +143,6 @@ func ParseMutation(mutation string) (*api.Mutation, error) {
 			continue
 		}
 		if item.Typ == itemRightCurl {
-			// mutations must be enclosed in a single block.
-			if it.Next() && it.Item().Typ != lex.ItemEOF {
-				return nil, x.Errorf("Unexpected %s after the end of the block.", it.Item().Val)
-			}
 			return &mu, nil
 		}
 		if item.Typ == itemMutationOp {
@@ -73,7 +168,7 @@ func parseMutationOp(it *lex.ItemIterator, op string, mu *api.Mutation) error {
 			}
 			parse = true
 		}
-		if item.Typ == itemMutationContent {
+		if item.Typ == itemMutationOpContent {
 			if !parse {
 				return x.Errorf("Mutation syntax invalid.")
 			}

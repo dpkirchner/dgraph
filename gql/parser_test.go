@@ -1639,9 +1639,9 @@ func TestParseMutationError(t *testing.T) {
 			}
 		}
 	`
-	_, err := ParseMutation(query)
+	_, _, err := ParseMutation(query)
 	require.Error(t, err)
-	require.Equal(t, `Expected { at the start of block. Got: [mutation]`, err.Error())
+	require.Contains(t, err.Error(), `Invalid block: [mutation]`)
 }
 
 func TestParseMutationError2(t *testing.T) {
@@ -1654,9 +1654,9 @@ func TestParseMutationError2(t *testing.T) {
 				<name> <is> <something-else> .
 			}
 	`
-	_, err := ParseMutation(query)
+	_, _, err := ParseMutation(query)
 	require.Error(t, err)
-	require.Equal(t, `Expected { at the start of block. Got: [set]`, err.Error())
+	require.Contains(t, err.Error(), `Invalid block: [set]`)
 }
 
 func TestParseMutationAndQueryWithComments(t *testing.T) {
@@ -4333,7 +4333,7 @@ func TestParseMutation(t *testing.T) {
 			}
 		}
 	`
-	mu, err := ParseMutation(m)
+	_, mu, err := ParseMutation(m)
 	require.NoError(t, err)
 	require.NotNil(t, mu)
 	sets, err := parseNquads(mu.SetNquads)
@@ -4375,7 +4375,7 @@ func TestParseMutationTooManyBlocks(t *testing.T) {
 		},
 	}
 	for _, tc := range tests {
-		mu, err := ParseMutation(tc.m)
+		_, mu, err := ParseMutation(tc.m)
 		if tc.errStr != "" {
 			require.Contains(t, err.Error(), tc.errStr)
 			require.Nil(t, mu)
